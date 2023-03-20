@@ -75,15 +75,16 @@ func main() {
 				}
 
 				// Read response
-				response := make([]byte, 1400)
+                challengeSent := false
 				for {
+                    response := make([]byte, 300)
 					if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil { // Set timeout for reading a response to 5 seconds
 						log.Printf("Failed to set read deadline for %s: %v", connStr, err)
 					}
 					if _, err := conn.Read(response); err != nil {
+                        log.Printf("%s -> %s", connStr, response)
 						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 							log.Printf("Timed out while waiting for response from %s", connStr)
-
 						} else {
 							log.Printf("Failed to read response from %s: %v", connStr, err)
 						}
@@ -94,7 +95,7 @@ func main() {
 							connStr: connStr,
 							err:     err,
 						}
-						return
+						continue
 					} else {
 						if response[4] == 0x49 {
 							responseCh <- struct {
@@ -104,8 +105,14 @@ func main() {
 								connStr: connStr,
 								data:    response,
 							}
-							return
-						}
+							break
+						} else if response[4] == 0x41 && !challengeSent { // Reply to the challenge for A2S_info
+                            log.Printf("Challenge Detected")
+                            next4Bytes := response[5:9]
+                            challengeQueryPacket := queryPacket + string(next4Bytes)
+                            conn.Write([]byte(challengeQueryPacket))
+                            challengeSent = true
+                        }
 					}
 				}
 			}(connStr)
@@ -118,7 +125,7 @@ func main() {
             case response := <-responseCh:
                 log.Printf("Received response from %s: %v\n", response.connStr, string(response.data))
                 cache[response.connStr] = response.data
-                log.Printf("%s\n", cache[response.connStr])
+                // log.Printf("%s\n", cache[response.connStr])
             case err := <-errorCh:
                 log.Printf("Encountered error: %v\n", err)
                 cache[err.connStr] = nil // Write nil to cache for connection that did not respond
