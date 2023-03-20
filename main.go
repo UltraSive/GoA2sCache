@@ -12,7 +12,7 @@ import (
 const (
 	queryPacket = "\xff\xff\xff\xffTSource Engine Query\x00"
 	cacheFile   = "cache.json"
-	updateFreq  = time.Minute * 1 // update cache every 1 minutes
+	updateFreq  = time.Second * 15 // update cache every 15 seconds
 )
 
 func main() {  
@@ -35,62 +35,99 @@ func main() {
 
 		// Create cache map and channels
         cache := make(map[string][]byte)
-        responseCh := make(chan []byte)
-        errorCh := make(chan error)
+        responseCh := make(chan struct {
+            connStr string
+            data    []byte
+        })
+        errorCh := make(chan struct {
+			connStr string
+			err     error
+		})
 
         // Loop over connections and start a goroutine for each one
-        for _, connStr := range connections {
-            go func(connStr string) {
-                conn, err := net.DialTimeout("udp", connStr, time.Second*5)
-                if err != nil {
-                    log.Printf("Failed to connect to %s: %v", connStr, err)
-                    errorCh <- err
-                    return
-                }
-                defer conn.Close()
+		for _, connStr := range connections {
+			go func(connStr string) {
+				conn, err := net.DialTimeout("udp", connStr, time.Second*5)
+				if err != nil {
+					log.Printf("Failed to connect to %s: %v", connStr, err)
+					errorCh <- struct {
+						connStr string
+						err     error
+					}{
+						connStr: connStr,
+						err:     err,
+					}
+					return
+				}
+				defer conn.Close()
 
-                // Send query packet
-                if _, err := conn.Write([]byte(queryPacket)); err != nil {
-                    log.Printf("Failed to send query to %s: %v", connStr, err)
-                    errorCh <- err
-                    return
-                }
+				// Send query packet
+				if _, err := conn.Write([]byte(queryPacket)); err != nil {
+					log.Printf("Failed to send query to %s: %v", connStr, err)
+					errorCh <- struct {
+						connStr string
+						err     error
+					}{
+						connStr: connStr,
+						err:     err,
+					}
+					return
+				}
 
-                // Read response
-                response := make([]byte, 2048)
-                if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil { // Set timeout for reading a response to 5 seconds
-                    log.Printf("Failed to set read deadline for %s: %v", connStr, err)
-                }
-                if _, err := conn.Read(response); err != nil {
-                    if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-                        log.Printf("Timed out while waiting for response from %s", connStr)
-                    } else {
-                        log.Printf("Failed to read response from %s: %v", connStr, err)
-                    }
-                    errorCh <- err
-                    return
-                }
+				// Read response
+				response := make([]byte, 1400)
+				for {
+					if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil { // Set timeout for reading a response to 5 seconds
+						log.Printf("Failed to set read deadline for %s: %v", connStr, err)
+					}
+					if _, err := conn.Read(response); err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							log.Printf("Timed out while waiting for response from %s", connStr)
 
-                responseCh <- response
-            }(connStr)
-        }
+						} else {
+							log.Printf("Failed to read response from %s: %v", connStr, err)
+						}
+						errorCh <- struct {
+							connStr string
+							err     error
+						}{
+							connStr: connStr,
+							err:     err,
+						}
+						return
+					} else {
+						if response[4] == 0x49 {
+							responseCh <- struct {
+								connStr string
+								data    []byte
+							}{
+								connStr: connStr,
+								data:    response,
+							}
+							return
+						}
+					}
+				}
+			}(connStr)
+		}
 
         // Wait for responses from all connections and cache them
-        for i := 0; i < len(connections); i++ {
+        numResponsesReceived := 0
+        for {
             select {
             case response := <-responseCh:
-                log.Printf("Received response: %v\n", string(response))
-                cache[connections[i]] = response
+                log.Printf("Received response from %s: %v\n", response.connStr, string(response.data))
+                cache[response.connStr] = response.data
+                log.Printf("%s\n", cache[response.connStr])
             case err := <-errorCh:
                 log.Printf("Encountered error: %v\n", err)
-                cache[connections[i]] = nil // Write nil to cache for connection that did not respond
+                cache[err.connStr] = nil // Write nil to cache for connection that did not respond
             }
-        }
 
-        // Remove servers that are no longer in the configuration
-        for connStr := range cache {
-            if !servers[connStr] {
-                delete(cache, connStr)
+            numResponsesReceived++
+
+            if numResponsesReceived == len(connections) {
+                break
             }
         }
 
