@@ -185,7 +185,7 @@ func main() {
                 cache[response.connStr] = response.data
             case err := <-errorCh:
                 log.Printf("Encountered error: %v\n", err)
-                // cache[err.connStr] = nil // Write nil to cache for connection that did not respond
+                cache[err.connStr] = nil // Write nil to cache for connection that did not respond
             }
 
             numResponsesReceived++
