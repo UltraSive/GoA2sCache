@@ -5,7 +5,6 @@ import (
     "encoding/json"
 	"log"
 	"net"
-	"os"
 	"time"
 )
 
@@ -15,8 +14,49 @@ const (
 	updateFreq  = time.Second * 15 // update cache every 15 seconds
 )
 
-func main() {  
+// Map data type of cached responses
+var cache = make(map[string][]byte)
+
+// Create a map to hold the goroutines for each address in the cache
+var addressListeners = make(map[string]chan bool)
+
+func listenAndServe(addr string, data []byte) {
+    log.Printf("Serving from: %s\n", addr)
+
+    udpAddr, err := net.ResolveUDPAddr("udp", addr)
+    if err != nil {
+        log.Fatalf("Failed to resolve UDP address: %s", err)
+    }
+
+    conn, err := net.ListenUDP("udp", udpAddr)
+    if err != nil {
+        log.Fatalf("Failed to listen on UDP: %s", err)
+    }
+    defer conn.Close()
+
+    for {
+        buffer := make([]byte, 1024)
+        n, clientAddr, err := conn.ReadFromUDP(buffer)
+        if err != nil {
+            log.Printf("Failed to read UDP message: %s", err)
+            continue
+        }
+
+        if string(buffer[:n]) == queryPacket {
+            _, err := conn.WriteToUDP(data, clientAddr)
+            if err != nil {
+                log.Printf("Failed to respond to UDP message: %s", err)
+            }
+            log.Printf("Responding to client: %s\n", clientAddr)
+        }
+    }
+}
+
+func main() {   
 	for {
+        // Show what the current cache map looks like
+        log.Printf("Current cache status: %v\n", cache)
+
         // Read server configuration from JSON file
         serversFile, err := ioutil.ReadFile("servers.json")
         if err != nil {
@@ -28,13 +68,13 @@ func main() {
             log.Fatalf("Failed to parse server configuration: %v", err)
         }
 
+        // Might be unncessesary to have this variable
         connections := make([]string, 0, len(servers))
         for connStr := range servers {
             connections = append(connections, connStr)
         }
 
-		// Create cache map and channels
-        cache := make(map[string][]byte)
+		// Create channels for go routine
         responseCh := make(chan struct {
             connStr string
             data    []byte
@@ -43,6 +83,26 @@ func main() {
 			connStr string
 			err     error
 		})
+
+        // Stop any existing goroutines for addresses that are no longer in the cache
+        for addr, done := range addressListeners {
+            if _, ok := cache[addr]; !ok {
+                done <- true
+                delete(addressListeners, addr)
+            }
+        }
+
+        // Start new goroutines for addresses that are in the cache but don't have a goroutine yet
+        for addr, data := range cache {
+            if _, ok := addressListeners[addr]; !ok {
+                done := make(chan bool)
+                addressListeners[addr] = done
+                go func(addr string, data []byte, done chan bool) {
+                    listenAndServe(addr, data)
+                    close(done)
+                }(addr, data, done)
+            }
+        }
 
         // Loop over connections and start a goroutine for each one
 		for _, connStr := range connections {
@@ -78,9 +138,7 @@ func main() {
                 challengeSent := false
 				for {
                     response := make([]byte, 300)
-					if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil { // Set timeout for reading a response to 5 seconds
-						log.Printf("Failed to set read deadline for %s: %v", connStr, err)
-					}
+					conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Set timeout for reading a response to 5 seconds
 					if _, err := conn.Read(response); err != nil {
                         log.Printf("%s -> %s", connStr, response)
 						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -97,7 +155,7 @@ func main() {
 						}
 						continue
 					} else {
-						if response[4] == 0x49 {
+						if response[4] == 0x49 { 
 							responseCh <- struct {
 								connStr string
 								data    []byte
@@ -125,10 +183,9 @@ func main() {
             case response := <-responseCh:
                 log.Printf("Received response from %s: %v\n", response.connStr, string(response.data))
                 cache[response.connStr] = response.data
-                // log.Printf("%s\n", cache[response.connStr])
             case err := <-errorCh:
                 log.Printf("Encountered error: %v\n", err)
-                cache[err.connStr] = nil // Write nil to cache for connection that did not respond
+                // cache[err.connStr] = nil // Write nil to cache for connection that did not respond
             }
 
             numResponsesReceived++
@@ -137,26 +194,5 @@ func main() {
                 break
             }
         }
-
-        // Save cache to file
-        cacheFile, err := os.Create("cache.json")
-        if err != nil {
-            log.Fatalf("Failed to create cache file: %v", err)
-        }
-        defer cacheFile.Close()
-
-        cacheJSON, err := json.Marshal(cache)
-        if err != nil {
-            log.Fatalf("Failed to encode cache as JSON: %v", err)
-        }
-
-        if _, err := cacheFile.Write(cacheJSON); err != nil {
-            log.Fatalf("Failed to save cache: %v", err)
-        }
-
-		log.Println("Cache saved successfully.")
-
-		// Wait for the update frequency before next update
-		time.Sleep(updateFreq)
 	}
 }
