@@ -20,29 +20,41 @@ var cache = make(map[string][]byte)
 // Create a map to hold the goroutines for each address in the cache
 var addressListeners = make(map[string]chan bool)
 
-func listenAndServe(addr string, data []byte) {
+func listenAndServe(addr string) {
     log.Printf("Serving from: %s\n", addr)
-
     udpAddr, err := net.ResolveUDPAddr("udp", addr)
     if err != nil {
         log.Fatalf("Failed to resolve UDP address: %s", err)
     }
+    log.Printf("Machine Addr: %s", udpAddr.IP.String())
+    udpAddr.Port = 9110
 
     conn, err := net.ListenUDP("udp", udpAddr)
     if err != nil {
         log.Fatalf("Failed to listen on UDP: %s", err)
     }
-    defer conn.Close()
+    //defer conn.Close()
 
     for {
         buffer := make([]byte, 1024)
         n, clientAddr, err := conn.ReadFromUDP(buffer)
+        log.Printf("Client Addr: %s\n", clientAddr.IP.String())
+        
+        // Make sure it doesnt respond to queries from itself
+        if clientAddr.IP.String() == udpAddr.IP.String() || clientAddr.IP.String() == "127.0.0.1" { 
+            log.Printf("Skipping from serving self: %s\n", clientAddr.IP.String())
+            continue
+        }
+
         if err != nil {
             log.Printf("Failed to read UDP message: %s", err)
             continue
         }
 
         if string(buffer[:n]) == queryPacket {
+            var data = cache[addr]
+            log.Printf("Test: %s", addr)
+            log.Printf("Data being send to client %v", data)
             _, err := conn.WriteToUDP(data, clientAddr)
             if err != nil {
                 log.Printf("Failed to respond to UDP message: %s", err)
@@ -82,31 +94,12 @@ func main() {
         errorCh := make(chan struct {
 			connStr string
 			err     error
-		})
-
-        // Stop any existing goroutines for addresses that are no longer in the cache
-        for addr, done := range addressListeners {
-            if _, ok := cache[addr]; !ok {
-                done <- true
-                delete(addressListeners, addr)
-            }
-        }
-
-        // Start new goroutines for addresses that are in the cache but don't have a goroutine yet
-        for addr, data := range cache {
-            if _, ok := addressListeners[addr]; !ok {
-                done := make(chan bool)
-                addressListeners[addr] = done
-                go func(addr string, data []byte, done chan bool) {
-                    listenAndServe(addr, data)
-                    close(done)
-                }(addr, data, done)
-            }
-        }
+		}) 
 
         // Loop over connections and start a goroutine for each one
 		for _, connStr := range connections {
 			go func(connStr string) {
+                log.Printf("Started new GoRoutine to generate newer cache.")
 				conn, err := net.DialTimeout("udp", connStr, time.Second*5)
 				if err != nil {
 					log.Printf("Failed to connect to %s: %v", connStr, err)
@@ -119,6 +112,7 @@ func main() {
 					}
 					return
 				}
+                log.Printf("Connect to %s", connStr)
 				defer conn.Close()
 
 				// Send query packet
@@ -133,6 +127,7 @@ func main() {
 					}
 					return
 				}
+                log.Printf("Sent query to %s", connStr)
 
 				// Read response
                 challengeSent := false
@@ -156,6 +151,7 @@ func main() {
 						continue
 					} else {
 						if response[4] == 0x49 { 
+                            log.Printf("Found correct Source Engine Query response from: %s", connStr)
 							responseCh <- struct {
 								connStr string
 								data    []byte
@@ -163,6 +159,7 @@ func main() {
 								connStr: connStr,
 								data:    response,
 							}
+                            log.Printf("%s -> %s", connStr, response)
 							break
 						} else if response[4] == 0x41 && !challengeSent { // Reply to the challenge for A2S_info
                             log.Printf("Challenge Detected")
@@ -183,6 +180,7 @@ func main() {
             case response := <-responseCh:
                 log.Printf("Received response from %s: %v\n", response.connStr, string(response.data))
                 cache[response.connStr] = response.data
+                log.Printf("Updated cache")
             case err := <-errorCh:
                 log.Printf("Encountered error: %v\n", err)
                 cache[err.connStr] = nil // Write nil to cache for connection that did not respond
@@ -191,8 +189,35 @@ func main() {
             numResponsesReceived++
 
             if numResponsesReceived == len(connections) {
+                log.Printf("Finished adding responses to cache")
                 break
             }
         }
+
+        // Stop any existing goroutines for addresses that are no longer in the cache
+        for addr, done := range addressListeners {
+            if _, ok := cache[addr]; !ok {
+                done <- true
+                delete(addressListeners, addr)
+            }
+        }
+
+        // Start new goroutines for addresses that are in the cache but don't have a goroutine yet
+        //// Doesnt need data
+        for addr, data := range cache {
+            if _, ok := addressListeners[addr]; !ok {
+                done := make(chan bool)
+                addressListeners[addr] = done
+                go func(addr string, data []byte, done chan bool) {
+                    listenAndServe(addr)
+                    close(done)
+                }(addr, data, done)
+            }
+        }
+
+        // Delete goroutines for addresses that have a null value in cache.
+
+        //Hold off from updating again
+        time.Sleep(updateFreq)
 	}
 }
