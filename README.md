@@ -8,3 +8,7 @@ GoLang packet caching system that will retrieve cached packets when queried.
   "127.0.0.1:28027": null
 }
 ```
+### IPTables Config To Forward Port To 9110
+```
+iptables -t nat -A PREROUTING -p udp --dport 28017 -j REDIRECT --to-ports 9110
+```
