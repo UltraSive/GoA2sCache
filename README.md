@@ -1,5 +1,5 @@
-# GoCache
-GoLang packet caching system that will retrieve cached packets when queried. 
+# Go-A2sCache-Database (Hub)
+GoLang packet caching system that retrieve packets and store them in a database that can be queried by edge servers who will respond to the A2s queries.
 
 ### Example Cache.json Output
 ```json
